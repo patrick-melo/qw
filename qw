@@ -1,0 +1,2588 @@
+#!/bin/sh
+################################################################################
+#                                                                              #
+# --==| QICWARE Aministration Script |==--                                     #
+#                                                                              #
+# Copyright (c) 2005 Patrick Melo <patrick@qantel.com>                         #
+#                                                                              #
+# Permission is hereby granted, free of charge, to any person obtaining a      #
+# copy of this software and associated documentation files (the                #
+# "Software"), to deal in the Software without restriction, including          #
+# without limitation the rights to use, copy, modify, merge, publish,          #
+# distribute, distribute with modifications, sublicense, and/or sell           #
+# copies of the Software, and to permit persons to whom the Software is        #
+# furnished to do so, subject to the following conditions:                     #
+#                                                                              #
+# The above copyright notice and this permission notice shall be included      #
+# in all copies or substantial portions of the Software.                       #
+#                                                                              #
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS      #
+# OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF                   #
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.       #
+# IN NO EVENT SHALL THE ABOVE COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,       #
+# DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR        #
+# OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR        #
+# THE USE OR OTHER DEALINGS IN THE SOFTWARE.                                   #
+#                                                                              #
+# Except as contained in this notice, the name(s) of the above copyright       #
+# holders shall not be used in advertising or otherwise to promote the         #
+# sale, use or other dealings in this Software without prior written           #
+# authorization.                                                               #
+#                                                                              #
+# Author: Patrick Melo                                                         #
+# Version: 3.52                                                                #
+#                                                                              #
+################################################################################
+
+# Notes:
+# http://www.ooblick.com/text/sh/ (eg of $* $@ $#)
+# http://www.tldp.org/LDP/abs/html/comparison-ops.html (bash guide)
+
+#+ QW(1)                    QICWARE Scripts                    QW(1)
+#+ 
+#+ NNAAMMEE
+#+      qw - administer QICWARE with impunity
+#+ 
+#+ SSYYNNOOPPSSIISS
+#+      qw [command] [OPTION]...
+#+ 
+#+ DDEESSCCRRIIPPTTIIOONN
+#+      qw is a script to help do some of the more menial tasks in QICWARE.
+#+ 
+#+ AARRGGUUMMEENNTTSS
+#+      This script requires that the variables be set: HOME
+#+ 
+#+      To perform an upgrade you can use the upgrade option. If you run into 
+#+      an error you will need to complete the rest of the steps on your own.
+#+      The upgrade command executes the following commands in order:
+#+ 
+#+        qw updatescript
+#+        qw mount
+#+        qw install
+#+        qw stop!
+#+        qw backup
+#+        qw swap
+#+        qw restore
+#+        qw qsetperms
+#+        qw start
+#+      
+#+      If no commands are provided then the usage is displayed. This script
+#+      accepts the following commands:
+#+ 
+
+################################################################################
+# Command line options                                                         #
+################################################################################
+
+#+      [backdisc]       Backup a logical disc
+#+  
+#+      Copies an entire logical disk into a compressed tar. Refer to the cron
+#+      documentation below for more information. 
+#+  
+cmd_backdisc()
+{
+  [ -z "$1" ] && error "Usage: qw backdisc <disc>"
+  DSTFILE=$1.tar.Z
+  [ $OS = "rh_linux" ] && DSTFILE=$1.tar.gz
+
+  SRCPATH=`discroot $1`
+  cmd_tarz create $DSTFILE $SRCPATH
+}
+
+#+      [backup]         Archive system files
+#+  
+#+      Copies certain files (*MONITOR ACTIVATE m01.cfig, qsqlserver.ini, 
+#+      oadrd.ini into a safe place so that the restore option can put them 
+#+      back in place when a fresh install is made. The m01.cfig should be
+#+      placed at the top of the list as other files may be dependent on 
+#+      the m01.cfig for resolution.
+#+  
+cmd_backup()
+{
+  # FIXME: We might just add this to the beginning of the script!
+  [ ! -f $QCFIG ] && error "Cannot find Configuration file."
+
+  chkdown
+
+  [ ! -f $CONF ] && error "Cannot find backup list, use the 'conf' command."
+
+  xecho "Backing system files: "
+  for x in `egrep -v "^#|^ *$" $CONF`
+  do
+    xecho "$x "
+    if [ `echo $x | grep ","` ]
+    then
+      backup $x
+    else
+      x=`echo $x | sed 's?$HOME?'$HOME'?g'`
+      DST=$CUSDIR/`basename $x`
+      if [ -d $x ] ; then
+        rm -fr $DST          # $DST is always under $HOME/.admintools/cus
+        cp -R `echo $x` $DST
+      else
+        cp `echo $x` $DST
+      fi
+    fi
+  done
+  echo
+}
+
+#+      [conf]           Manage the list of backed files
+#+
+#+      Here are some files that might be in that configuration:
+#+      $HOME/etc/m01.cfig
+#+      $HOME/etc/qsql/qsqlserver.ini
+#+      $HOME/etc/qsql/oadrd.ini
+#+      RPG,RPG,#RPGPASS
+#+      QCL,QCL,#QCLPASS
+#+      QED,QED,#QED
+#+      QTX,QTX,#QIC-PC
+#+      FLS,FLS,*FLZPASS
+#+      SED,SED,#EMAST
+#+  
+cmd_conf()
+{
+
+# FIXME: if we revert back to rel then delete file
+
+  if [ ! -f $CONF ]; then
+    echo "\
+# qw.conf file.
+#
+# This file MUST be edited with the 'qw conf' command as the QICWARE admin.
+#
+#$HOME/etc/m01.cfig
+#$HOME/etc/qsql/qsqlserver.ini
+#$HOME/etc/qsql/oadrd.ini
+#RPG,RPG,#RPGPASS
+#QCL,QCL,#QCLPASS
+#QED,QED,#QED
+#QTX,QTX,#QIC-PC
+#FLS,FLS,*FLZPASS
+#SED,SED,#EMAST\
+" > $CONF.rel
+
+    cp $CONF.rel $CONF.tmp
+    vi $CONF.tmp
+
+    diff $CONF.tmp $CONF.rel >/dev/null 2>&1
+    [ $? -ne 0 ] && cp $CONF.tmp $CONF
+
+    rm $CONF.rel
+
+  else 
+    vi $CONF
+  fi
+}
+
+#+      [console]        Enter the qicware console
+#+
+cmd_console()
+{
+  qconsole $QCFIG
+}
+
+#+      [cron]           Manage backups of logical discs
+#+
+#+      In order for this option to work symlinks to the backup directories
+#+      must be created. These symlinks are located in $HOME/.admintools.
+#+      One symlink is named back1, this points to the location that will only
+#+      store one copy of the file.  The other symlink is back5, this one points
+#+      to the directory that will contain a week's worth of backups.
+#+      The command 'crontab -e' will allow you to edit the crontab.  The
+#+      following line will backup the DSK disk every day at 5 minutes to 
+#+      midnight (this has the added benefit of giving files a timestamp.
+#+
+#+      55 23 * * 1-5 sh -c 
+#+      "$HOME/.admintools/bin/qw cron DSK" 2>&1 | mail -s host qwadmin"
+#+
+#+      You might use the following line for backing up HOME as well.
+#+
+#+      55 23 * * 1-5 sh -c 
+#+      "/home/qicware/.admintools/bin/qw cron HOME DSK" 2>&1 | 
+#+      mail -s host qwadmin
+#+
+#+      Refer to the "QICWARE Reference Manual" for tips on creating 
+#+      successful backup routines. For information on how to extract a
+#+      backup file, refer to the qw tarz command.
+#+  
+cmd_cron()
+{
+  echo "Cron job started at `date`" ; echo
+  DISC="$@"
+  [ -z "$DISC" ] && error "Usage: qw cron <discs>"
+
+  DTE=`date +%A`
+
+  #setback0
+  BACK0=`tracelink $ADMDIR/back0`
+  [ ! $? -eq 0 ] && error "cannot access temp directory for backups : $BACK0"
+  echo "back0: $BACK0"
+
+  #setback1
+  BACK1=`tracelink $ADMDIR/back1`
+  [ $? -eq 0 ] && DOBACK1=1
+  echo "back1: $BACK1"
+
+  #setback5
+  BACK5=`tracelink $ADMDIR/back5`
+  [ $? -eq 0 ] && DOBACK5=1 
+  echo "back5: $BACK5"
+
+  echo
+
+  # NOTE: To test this without stopping qicware just comment the three lines:
+  # cmd_stop2 waitoncfig cmd_start2
+
+  unset BASH_ENV ; su $QWADMIN -c "$THIS stop!"
+  waitoncfig
+
+  cd $BACK0
+  for x in $DISC; do
+
+    if [ $x = "home" ] ; then
+      echo
+      DSTFILE=home.tar.Z
+      [ $OS = "rh_linux" ] && DSTFILE=$1.tar.gz
+      chkrm $DTE.$DSTFILE
+      cmd_tarz create $DSTFILE $HOME
+    else
+      echo
+      cmd_du $x
+      echo
+      DSTFILE=$x.tar.Z
+      [ $OS = "rh_linux" ] && DSTFILE=$x.tar.gz
+      chkrm $DTE.$DSTFILE
+      cmd_backdisc $x
+    fi
+
+    chown $QWADMIN $DSTFILE
+    chgrp $QWGROUP $DSTFILE
+
+    # Do we want a remove copy also? Try linking it first.
+    [ $DOBACK1 ] && \
+    rm -f $BACK1/$DSTFILE && \
+      [ ! -z "`ln $DSTFILE $BACK1/$DSTFILE 2>&1`" ] && \
+      cp $DSTFILE $BACK1/$DSTFILE
+    [ $DOBACK5 ] && mv $DSTFILE $BACK5/$DTE.$DSTFILE
+  done
+  echo;uptime;echo
+  unset BASH_ENV ; su $QWADMIN -c "$THIS start!"
+  echo "Cron job completed at `date`"
+}
+
+#+      [daemons]        Starts background QICWARE daemons
+#+ 
+cmd_daemons()
+{
+  chkup
+
+  daemons=`get daemons`
+  if [ ! -z "$daemons" ] ; then
+    xecho "Starting qicware daemons: "
+    for x in $daemons ; do
+      xecho "$x "
+      $HOME/bin/qrun -F $QCFIG -C $x -A >/dev/null 2>&1 & 
+    done
+    #echo_status $?
+    echo
+  fi
+}
+
+#+      [debug]          Creates log file of qw script
+#+ 
+cmd_debug()
+{
+  [ -z "$1" ] && error "Usage: qw debug <command>"
+  echo "Sending output to qw.out"
+  sh -x $THIS $@ >qw.out 2>&1
+}
+
+#+      [diff]           Differentiates between two files
+#+ 
+cmd_diff()
+{
+  [ -z "$1" -o -z "$2" ] && error "usage: diff2 <orig> <new>"
+  case $OS in
+  rh_linux)
+    diff -bBdNrw -U5 $1 $2
+    ;;
+  *)
+    diff -c $1 $2
+  esac
+
+}
+
+#+      [discroot]       Displays the root directory for a given disc
+#+  
+#+      The disc will be searched by disc label and disc name. Be careful
+#+      not to give a disc a label used as a name by another disc.
+#+ 
+cmd_discroot()
+{
+  [ -z "$1" ] && error "Usage: qw discroot <disc>"
+  discroot $1
+}
+
+#+      [dnsck]          Checks the hostnames of the QICPCII terminals 
+#+ 
+cmd_dnsck()
+{
+  echo "Checking names in $QCFIG"
+  for x in `awk -F, '/^TERMINAL/ && /qsock/ {print $3}' $QCFIG | sort | uniq`
+  do
+    echo "[`date`] $x"
+    $NSLOOKUP $x >/dev/null
+  done
+}
+
+#+      [du]             Report disk usage for a given disc
+#+ 
+cmd_du()
+{
+  [ -z "$1" ] && error "Usage: qw du <disc>."
+
+  echo "SUMMARY of $1 on `hostname` (`date`)"
+  echo
+  NROOT=`discroot $1`
+  echo "KBYTES  PATH"
+  du -k $NROOT | sort -nr
+}
+
+#+      [filecheck]      Fixes file corruption on a file with QICWARE running
+#+ 
+cmd_filecheck()
+{
+  [ -z "$1" ] && error "Usage: qw filecheck <file>"
+
+  CSNAME=`quname -w "$1"`
+  CINAME=`quname "$1"`
+
+  if [ -f $1.dat -a -f $1.idx ]; then
+    TMP=$1;
+  elif [ -f $CINAME.dat -a -f $CINAME.idx ]; then
+    TMP=$CINAME;
+  elif [ -f $CSNAME.dat -a -f $CSNAME.idx ]; then
+    TMP=$CSNAME;
+  else
+    error "$1: file does not exist"
+  fi
+
+  #[ ! -f $1.dat -o ! -f $1.idx ] && error "$1: file does not exist"
+
+  [ ! -d $TMPDIR ] && mkdir $TMPDIR
+  
+  chkup
+
+  echo "fixing $TMP"
+  cp $TMP.dat $TMPDIR/
+  cp $TMP.idx $TMPDIR/
+  qfsck -cy $TMPDIR/$TMP
+  quln -F $QCFIG $TMP
+  mv $TMPDIR/$TMP.idx .
+  mv $TMPDIR/$TMP.dat .
+  qln -F $QCFIG $TMP    
+}
+
+
+#+      [find]           Searches for given text under the current directory
+#+ 
+cmd_find()
+{
+  [ -z "$1" ] && error "Usage: qw find <text>"
+  echo "Looking for \"$1\" in files under \"`pwd`\" ..."
+  find .  -exec grep -Hi "$1" {} \; #2>/dev/null
+}
+
+#+      [hd]             Dump in hex
+#+ 
+cmd_hd()
+{
+  case $OS in
+  rh_linux)
+    hexdump -e '"%06.6_Ax\n"' -e '"%06.6_ax  " 8/1 "%02x " "  " 8/1 "%02x "' \
+    -e '"   " 16/1 "%_p" "\n"' $@
+    ;;
+  sco_unix)
+    hd $@
+    ;;
+  *)
+    error "Option not supported on this OS"
+  esac
+}
+
+#+      [help]           Displays help
+#+ 
+cmd_help()
+{
+  case $OS in
+  rh_linux)
+    grep "^#+" $THIS | cut -c4- | less -isr
+    ;;
+  *)
+    grep "^#+" $THIS | cut -c4- | more
+  esac
+}
+
+#+      [ifconfig]       Displays network configuration
+#+
+cmd_ifconfig()
+{
+  $SHOWNET
+}
+
+#+      [info]           Displays info about configured hosts
+#+ 
+cmd_info()
+{
+  [ ! $OS = "rh_linux" ] && error "This feaure supported on linux only"
+for x in `awk -F, '/TERMINAL/ && /qsock/ {print $4}' $QCFIG` ; do
+  dig -t HINFO $x | grep -v "^;" | grep HINFO
+done
+}
+
+#+ 
+#+      [install]        Installs QICWARE from cd as a swappable version
+#+      
+cmd_install()
+{
+
+  if [ -z "`echo $@ | grep www`" ] ; then
+    [ ! -d "$INSSRC" ] && \
+      error "Cannot find $INSSRC, please insert dist cd"
+
+    # The vfat module may not be loaded in the kernel
+    [ $OS = "rh_linux" -a ! -z "`ls $INSSRC | grep "~"`" ] && \
+      error "filenames are truncated, no long filename support."
+  else
+    [ ! $OS = "rh_linux" ] && error "Option not supported on this OS"
+    echo "Notice: This will reveal your password to anyone who runs ps"
+    xecho "WWW login: "
+    read httpuser
+    xecho "WWW password: "
+    read httppasswd
+    INSSRC=http://dealers.qantel.com/qicware/qicware/rh_linux
+  fi
+
+  echo "Installing from $INSSRC"
+
+  if [ -d "$INSDIR" ]
+  then
+    echo
+    echo "   This program uses $INSDIR as a temporary directory"
+    echo "   This message means that that directory currently exists"
+    echo "   New version of the program will not be intalled until the"
+    echo "   current temporary directory is removed"
+    error "Temp install directory already exists."
+  fi
+
+  cd
+  mkdir $INSDIR
+  cd $INSDIR
+
+  LIST="qicrt.tar.Z rpg.tar.Z qiclook.tar.Z qicode.tar.Z"
+  [ -f $INSSRC/qicrt.tar ] && \
+    LIST="qicrt.tar rpg.tar qiclook.tar qicode.tar"
+  LIST="$LIST fls.tar qed.tar qtx.tar sed.tar"
+  [ $OS = "hp_ux" -o $OS = "dec_unix" ] && \
+    LIST="QICRT.TAR;1 RPG.TAR;1 QICLOOK.TAR;1 QICODE.TAR;1 FLS.TAR;1 QED.TAR;1 QTX.TAR;1 SED.TAR;1"
+
+  mkdir ./addons
+ 
+  echo "Installing modules"
+  for x in $LIST ; do
+
+    xecho "$x "
+
+    if [ ! -z "`echo $x | egrep -i 'fls.tar|qed.tar|qtx.tar|sed.tar'`" ] ; then
+      SRCURL="$INSSRC/../addons/$x"
+      [ $OS = "hp_ux" -o $OS = "dec_unix" ] && SRCURL="$INSSRC/../ADDONS/$x"
+      DSTURL=./addons/
+    else
+      SRCURL=$INSSRC/$x
+      DSTURL=.
+    fi
+
+    if [ ! -z "`echo $@ | grep www`" ] ; then
+      wget $SRCURL --http-user=$httpuser --http-passwd=$httppasswd 2>/dev/null
+      #[ ! -f $x ] && \
+      #  { rmdir ./addons ; rmdir $INSDIR ; error "Failed to retrieve file." ; }
+      [ "$DSTURL" != "." ] && \
+        mv $x $DSTURL    # mv addons to addon dir
+    else
+      cp $SRCURL $DSTURL # orthogonality with www which cannot untar atomically
+    fi
+
+    [ ! -f $DSTURL/$x ] && \
+    { rmdir ./addons ; rmdir $INSDIR ; echo ; error "$x: Cannot open file." ; }
+
+    [ ! -z "`echo $x | grep .Z`" ] && { mv "$x" "$x.Z" ; gunzip $x.Z ; }
+
+    /bin/sh -c "{ cd $DSTURL ; tar xf \"$x\" ; rm -f \"$x\" ; }"
+  done
+  echo
+
+  awk -F Version '/Version/ {print }' $INSSRC/../../default.htm \
+    | sed -e 's/&reg;//g' -e 's/<.*>//g' -e 's/&nbsp;//g' > ./etc/.cid
+
+  chkfile $INSDIR/bin/qrun
+  VERSION=`echo_shortver $INSDIR/bin/qrun`
+  [ -z "$VERSION" ] && \
+    sno "Cannot determine qrun version, corrupt binary."
+
+  if [ ! -d $VERDIR ]
+  then
+    echo "creating $VERDIR"
+    mkdir $VERDIR
+  fi
+
+  DST=$VERDIR/$VERSION
+
+  if [ -d $VERDIR/$VERSION ]
+  then
+    echo "The previous $VERSION is being deprecated"
+    UNIQUE=`getunique`
+    mv $DST ${DST}-${UNIQUE}
+  fi
+
+  mv $INSDIR $DST
+  cd
+  echo "QICWARE $VERSION installed as a swappable version"
+}
+
+#+      [installscript]  Installs this script
+#+
+#+      This command only needs to be run once, the first time the script is
+#+      copied onto the machine.  Subsequent updates to the script should be
+#+      obtained using the updatescript command.
+#+ 
+cmd_installscript()
+{
+  chkabspath $0
+  
+  echo "installing script ..."
+  [ `exist $ADMDIR` ] && error "$ADMDIR already exists"
+  [ `exist $BINDIR` ] && error "$BINDIR already exists"
+  [ `exist $CUSDIR` ] && error "$CUSDIR already exists"
+  [ `exist $VERDIR` ] && error "$VERDIR already exists"
+  [ `exist $THIS` ] && error "$BINDIR already exists"
+  [ `exist $BINDIR/l` ] && error "$BINDIR already exists"
+
+  mkdir $ADMDIR
+  mkdir $BINDIR
+  mkdir $CUSDIR
+  mkdir $VERDIR
+  mv $0 $THIS
+
+  mkls
+
+  echo "done."
+  echo "Please do not forget to add \$HOME/.admintools/bin to your path."
+}
+
+#+      [ipcrm]          Removes IPC elements
+#+
+#+
+cmd_ipcrm()
+{
+  for x in `ipcs -m | grep $QWADMIN | awk '{print $2}'` ; do
+    echo "deleting mem $x"
+    ipcrm shm $x
+  done
+
+  for x in `ipcs -s | grep $QWADMIN | awk '{print $2}'` ; do
+    echo "deleting sem $x"
+    ipcrm sem $x
+  done
+
+  rm $HOME/etc/m01.cseg
+}
+
+#+      [java]           Run java
+#+
+cmd_java()
+{
+  [ -z "$1" ] && { echo "Usage: qw java class"; exit 1; }
+
+  JAVA_HOME=`get JAVA_HOME | awk '{print $1}'`
+  PATH=$JAVA_HOME/bin:$PATH
+  XMLDIR=$HOME/etc/qxml
+  export JAVA_HOME PATH
+
+  echo "JAVA_HOME: '$JAVA_HOME'"
+
+  [ ! -d "$JAVA_HOME" ] && error "JAVA_HOME invalid."
+
+  java -Djava.ext.dirs=. $@
+}
+
+#+      [link]           Links files to the system without any type information.
+#+
+#+      Example: qw link 'SYS,SYS,*MONITOR'
+#+ 
+cmd_link()
+{
+  [ -z "$1" ] && error "Usage: qw link <file>."
+
+  NATIVE=`echo_qupath $@`
+  [ $? -ne 0 ] && error "$NATIVE"
+
+  case "`gettype $NATIVE`" in
+  K)
+    k_link $NATIVE
+    ;;
+  O)
+    o_link $NATIVE
+    ;;
+  S)
+    s_link $NATIVE
+    ;;
+  *)
+    error "Unable to link $1."
+  esac
+}
+
+#+      [mkfs]           Creates QICWARE file system
+#+ 
+cmd_mkfs()
+{
+  [ -z "$1" ] && error "Usage: qw mkfs <dst>."
+  qmkfs -w $1
+}
+
+#+      [m01.cfig]       Edit QICWARE Configuration file
+#+ 
+cmd_m01_cfig()
+{
+  $EDITOR $QCFIG
+}
+
+#+      [mount]          Mounts CD
+#+ 
+cmd_mount()
+{
+  if [ ! -z "`$MOUNT | grep /mnt`" ] 
+  then
+    echo "cd already mounted"
+  else
+    echo "Mounting cd"
+
+    case $OS in
+    ibm_aix)
+      chkcmd su root -c "mount -v cdrfs -r /dev/cd0 /mnt"
+      ;;
+    hp_ux)
+      chkcmd su root -c "mount /dev/dsk/c0t2d0 /mnt -r -F cdfs"
+      ;;
+    sco_unix)
+      chkcmd su root -c "mount -f HS,lower -o ro /dev/cd0 /mnt"
+      ;;
+    dec_unix)
+      chkcmd su root -c "/usr/sbin/mount -t cdfs -o noversion -o -ro /dev/rz4c /mnt"
+      ;;
+    rh_linux)
+      #[ -z "`grep vfat /proc/filesystems`" ] && \
+      #  error "No vfat support detected, check kernel configuration."
+      chkcmd su root -c "mount /dev/cdrom /mnt"
+      ;;
+    *)
+      error "Mount error."
+    esac
+  fi
+}
+
+#+      [netstat]        Displays the status of QICWARE tcp ports
+#+
+#+      For additional debug information on tcp ports consider downloading
+#+      lsof from
+#+      ftp://vic.cc.purdue.edu/pub/tools/unix/lsof/
+#+      and executing 'lsof -i TCP'
+#+ 
+cmd_netstat()
+{
+  # We cannot use -p tcp because on hp it causes entirely different output.
+  # What we would really like is something that allows us to specify the tcp
+  # port so that we don't do lookups on hosts we don't need information on.
+  echo "QICPCII"
+  $NETSTAT -a | grep tcp | egrep "1059|nimreg"
+  echo
+  echo "QICNET"
+  $NETSTAT -a | grep tcp | grep 1060
+  echo
+  echo "SQL"
+  $NETSTAT -a | grep tcp | grep 1706
+}
+
+#+      [netstat!]       Displays the status of QICWARE tcp ports using IPs
+#+
+#+      This option removes the lookups of hosts.
+#+ 
+cmd_netstat2()
+{
+  NETSTAT="$NETSTAT -n"
+  cmd_netstat
+}
+
+#+      [new]            Displays the status of QICWARE tcp ports using IPs
+#+
+#+      What has changed in this directory and below in the last 24 hours.
+#+ 
+cmd_new()
+{
+  CTIME=1
+  [ ! -z "$1" ] && CTIME=$1
+
+  find . -cmin -1440
+}
+
+#+      [oadrd.ini]      Edits the SQL database list
+#+
+#+      Configure data source names on the SQL server.
+#+ 
+cmd_oadrd_ini()
+{
+  FILE=`getkeyvalue QICSQL $QCFIG`
+  [ $? -ne 0 ] && error "$FILE"
+  FILE=`getkeyvalue SCHEMAPATH $FILE`
+  [ $? -ne 0 ] && error "$FILE"
+  FILE=$FILE/oadrd.ini
+
+  $EDITOR $FILE
+}
+
+
+#+      [odbcisql]       Launches interactive ODBC SQL program
+#+
+#+      
+cmd_odbcisql()
+{
+  /bin/csh -c "cd $HOME/odbc ; source config/ilinux/setenv.sh ; cd $HOME/odbc/bin/ilinux ; ./odbcisql"
+}
+
+# Description:  This is listed as cmd_postupdate because it is actually
+#   an unpublished command that gets called by the script itself following
+#   an upgrade.
+# Arguments: 
+# Returns: 
+#
+cmd_postupdate()
+{
+  echo "Performing postupdate of new script..."
+  cmd_ver
+
+  # upgrade from versions older than 3.51
+  [ -d $ADMDIR/custom ] && mv $ADMDIR/custom $CUSDIR
+  [ -d $ADMDIR/version ] && mv $ADMDIR/version $VERDIR
+}
+
+#+      [probe]          Clears possible keepalive problems
+#+ 
+cmd_probe()
+{
+  qmessage -u $QWADMIN "For Help, press F1"
+}
+
+#+      [ps]             Lists QICWARE processes
+#+
+#+      If you find that you're displaying processes that you do not think
+#+      belong to QICWARE, check the QICWARE bin directory for files like 'l'.
+#+ 
+# FIXME: Maybe we should custom display the output ex: ps -eo %a
+cmd_ps()
+{
+  SENTINEL="s3nt1n3l"
+  #SEARCH=$SENTINEL
+  SEARCH="-e $SENTINEL"
+
+  for x in \
+q601fs      qfsck    qlpserver  qpciserver  qserialserver  quname            \
+qas         qgetlp   qls        qpdf        qsetperms      quucp             \
+qbldfs      qicc     qmaild     qputlp      qshwrap        qvtserver         \
+qcfig       qicware  qmessage   qqname      qsockserver    qxtn              \
+qclkserver  qkbuild  qmkdir     qreports    qsqlserver                       \
+qcnvcfig    qld      qmkfs      qrmdir      qtapeserver                      \
+qconsole    qln      qmount     qrun        quln                             \
+qfaxserver  qlogin   qmv        qruns       qumount                          
+  do
+    SEARCH="$SEARCH -e (([[:space:]]|\/)$x([[:space:]]|$))"
+  done
+
+  #$PSALL | egrep \"$SEARCH\" | grep -v $SENTINEL
+  $PSALL | egrep $SEARCH | grep -v $SENTINEL
+}
+
+#+      [qfsck]          Runs qbldfs on all configured DISCs
+#+ 
+cmd_qfsck()
+{
+  for x in `grep "^DISC" $QCFIG | awk -F, '{print $4}'`
+  do
+    qbldfs `dirname $x`
+  done
+}
+
+#+      [qqlog]          Monitors qqlog
+#+ 
+cmd_qqlog()
+{
+  FILE=`getkeyvalue LOGFILE $QCFIG`
+  [ $? -ne 0 ] && error "$FILE"
+  tail -f $FILE
+}
+
+#+      [qsetperms]      Sets QICWARE permissions
+#+ 
+cmd_qsetperms()
+{
+  [ -z "`logname`" ] && error "logname not set, try running from console"
+  cd $HOME/bin
+  echo "Running qsetperms"
+  #su root -c "./qsetperms"
+  chkcmd su root -c "./qsetperms"
+}
+
+#+      [qsqlserver.ini] Configures the SQL server
+#+ 
+cmd_qsqlserver_ini()
+{
+  FILE=`getkeyvalue QICSQL $QCFIG`
+  [ $? -ne 0 ] && error "$FILE"
+
+  $EDITOR $FILE
+}
+
+#+      [qsqlserver.log] Monitors the SQL log file
+#+ 
+cmd_qsqlserver_log()
+{
+  FILE=`getkeyvalue QICSQL $QCFIG`
+  [ $? -ne 0 ] && error "$FILE"
+  FILE=`getkeyvalue TraceFile $FILE`
+  [ $? -ne 0 ] && error "$FILE"
+
+  # I get two, grab the second one
+  FILE=`echo $FILE | awk '{print $2}'`
+
+  tail -f $FILE
+}
+
+#+      [restart]        Restarts QICWARE
+#+ 
+cmd_restart()
+{
+  cmd_stop
+  cmd_start
+}
+
+#+      [restore]        Restores backed-up files such as *MONITOR
+#+ 
+cmd_restore()
+{
+  chkdown
+
+  [ ! -f $CONF ] && error "Cannot find $CONF."
+
+  xecho "Restoring system files: "
+  for x in `egrep -v "^#|^ *$" $CONF`
+  do
+    xecho "$x "
+    if [ `echo $x | grep ","` ]
+    then
+      restore $x
+    else
+      x=`echo $x | sed 's?$HOME?'$HOME'?g'`
+      cp -R $CUSDIR/`basename $x` $x
+    fi
+  done
+  echo
+}
+
+#+      [rmlocks]        Gracefully removes lock files
+#+ 
+# This does not support quotes in the path
+cmd_rmlocks()
+{
+  chkdown
+  xecho "removing locks: "
+  rm $HOME/etc/m01.cseg >/dev/null 2>&1
+  awk -F, '/^DISC/ {print $4}' $QCFIG > TMP
+  for x in `cat TMP`
+  do
+    rm -f `dirname $x`/`basename $x .fs`.lk
+  done
+  ipcs | awk '/^[sm]/ \
+    {system(sprintf("ipcrm -%s %s 2> /dev/null", $1, $2))}'
+  echo
+}
+
+#+      [sane]           Resets terminal colors
+#+ 
+cmd_sane()
+{
+  stty sane
+  [ $OS = "sco_unix" ] && setcolor -b black white
+}
+
+#+      [search]         Searches for a string in all files below the current 
+#+                       working dir.
+#+ 
+cmd_search()
+{
+  [ -z "$1" ] && { echo "USAGE: search txt"; exit 1; }
+
+  for x in `find . -print` ; do
+    TEMP=`file $x | grep ASCII`
+    if [ ! -z "$TEMP" ] ; then
+      RESULT=`grep $1 $x 2>/dev/null`
+      [ ! -z "$RESULT" ] && { echo $x; echo $RESULT; }
+    fi
+  done
+}
+
+#+      [socktree]       Trace qsock parents
+#+ 
+cmd_socktree()
+{
+  PIDS=`ps -ef | grep [q]sockserver | awk '{print $2}'`
+
+  # For all the qsockservers
+  for x in $PIDS
+  do
+   
+    # Get the PPID
+    var_PPID=`ps -fp$x | tail -1 | awk '{print $3}'`
+
+    if [ "$var_PPID" = "1" ]
+    then
+      echo "LISTENER [pid=$x] [ppid=$var_PPID]"
+
+      CHILDREN=`ps -ef | grep $x | awk '{print $2}'`
+      for y in $CHILDREN
+      do
+        var_PPID2=`ps -fp$y | tail -1 | awk '{print $3}'` 
+        if [ ! "$var_PPID2" = "1" ] #not the master again
+        then
+          echo "   |- $y [pid=$y] [ppid=$x]" 
+        fi
+      done
+    fi
+  done
+}
+
+#+      [source]         Displays the source of this script for editing
+#+ 
+cmd_source()
+{
+  $EDITOR $THIS
+}
+
+#+      [start]          Gracefully starts QICWARE
+#+ 
+#FIXME: Maybe we could output some advice on errors and warnings.
+cmd_start()
+{
+  #[ $OS = "rh_linux" ] && [[ "`rpm -q glibc`" = "glibc-2.3.4-2" ]] && \
+  #  { echo "WARNING: Using malloc workaround." ; export MALLOC_CHECK_=0 ; }
+
+  xecho "Starting qicware: "
+  #$HOME/bin/qcfig $QCFIG >/dev/null 2>/dev/null
+  cd $HOME
+  TMP="`$HOME/bin/qcfig -r $QCFIG 2>&1`"
+  echo_status $?
+  echo
+  [ ! -z "`echo $TMP | grep error`" ] && \
+    echo "WARNING: Some QICWARE Service may not have started, check qqlog."
+
+  # cmd_xml xml start ; sleep 2
+  #FIXME: run only if qicware start was successful
+  $THIS daemons
+}
+
+#+      [start!]         Forcefully starts QICWARE displaying all output
+#+ 
+cmd_start2()
+{
+  #[ $OS = "rh_linux" ] && [[ "`rpm -q glibc`" = "glibc-2.3.4-2" ]] && \
+  #  { echo "WARNING: Using malloc workaround." ; export MALLOC_CHECK_=0 ; }
+
+  xecho "starting QICWARE: "
+  cd $HOME
+  $HOME/bin/qcfig -r $QCFIG
+  $THIS daemons
+  echo
+}
+
+#+      [status]         Checks the status of QICWARE
+#+ 
+cmd_status()
+{
+  STATUS=0
+
+  xecho "control segment: "
+  if [ -f $HOME/etc/m01.cseg ]
+  then 
+    echo "up"
+    STATUS=1
+  else
+    echo "down"
+  fi
+
+  # If PORTSTAT is NULL then there is no status on that port. All is well.
+  xecho "qsock port: "
+  if [ -n "`$NETSTAT -na | grep 1059| grep tcp | cut -c1-2`" ]
+  then 
+    echo "occupied"
+    STATUS=1
+  else
+    echo "unoccupied"
+  fi
+
+  # If PORTSTAT is NULL then there is no status on that port. All is well.
+  xecho "sql port: "
+
+  if [ -n "`$NETSTAT -na | grep 1706 | grep tcp | cut -c1-2`" ]
+  then 
+    echo "occupied"
+    STATUS=1
+  else
+    echo "unoccupied"
+  fi
+
+  exit $STATUS
+}
+
+#+      [stop]           Gracefully stops QICWARE
+#+ 
+cmd_stop()
+{
+  xecho "Stopping qicware: "
+  $HOME/bin/qconsole -c $QCFIG >/dev/null 2>/dev/null
+  echo_status $?
+  echo
+}
+
+#+      [stop!]          Forcefully stops QICWARE displaying all output
+#+ 
+cmd_stop2()
+{
+  xecho "Shutting down QICWARE: "
+  $HOME/bin/qconsole -C $QCFIG
+}
+
+#+      [swap]           Swaps QICWARE versions
+#+ 
+#+      When a version is swapped the existence of an archive directory
+#+      corresponding to the version being swapped out is checked.  If the
+#+      directory exists then the version we are swapping is deprecated. This
+#+      can cause a problem if for some reason the directory is not eased
+#+      when the version was swapped into place.  This can happen if someone
+#+      is sitting in the version directory during the swap.  Stay out of 
+#+      the .admintools directory when running this script if you are a novice:
+#+      the directory is hidden for a reason.
+#+      I cannot guarantee that this function will work with versions before
+#+      065035.
+#+ 
+cmd_swap()
+{
+  chkfile $HOME/bin/qrun
+  VERSION=`echo_shortver $HOME/bin/qrun`
+  [ -z "$VERSION" ] && VERSION=0
+
+  [ -f "$HOME/etc/m01.cseg" ] && error "Control segment exists."
+
+  if [ ! -z "$1" ] ; then
+    CHOICE=$1
+    else
+    echo
+    echo "   Version currently installed: $VERSION"
+    echo
+
+    xecho "   Available versions: "
+    VERLIST=`ls $VERDIR/ | grep -v "-"`
+    echo $VERLIST
+
+    echo
+    xecho "   Please select the version you would like to run. "
+    read CHOICE
+  fi
+
+  [ -z "$CHOICE" ] && error "No version chosen."
+
+  echo "Installing $CHOICE"
+
+  # If it is not a valid version.
+  [ ! -d $VERDIR/$CHOICE ] && error "You have selected an invalid version."
+
+  # If one of the critical directories is missing
+  [ ! -d $VERDIR/$CHOICE/bin ] && error "SNO: critical bin missing"
+  [ ! -d $VERDIR/$CHOICE/etc ] && error "SNO: critical etc missing"
+  [ ! -d $VERDIR/$CHOICE/sys ] && error "SNO: critical sys missing"
+
+  NEWVERSION=$CHOICE
+  DSTPATH=$VERDIR/$VERSION      #Place currently installed software here
+  SRCPATH=$VERDIR/$NEWVERSION   #Install software from this location
+
+  if [ `exist "$DSTPATH"` ]
+  then
+    echo "The previous $VERSION is being deprecated."
+    DSTPATH=$DSTPATH-`getunique`
+  fi
+
+  mkdir $DSTPATH
+
+  echo "Moving existing files"
+  for folder in bin etc sys rpg qcl qic addons
+  do
+    xecho $folder
+    if [ -d $HOME/$folder ]
+    then
+      xecho "."
+      [ `exist "$DSTPATH/$folder"` ] && \
+        error "SNO: $DSTPATH/$folder already exists"
+      mv $HOME/$folder $DSTPATH/$folder
+    else
+      xecho "(skipped)"
+    fi
+
+    if [ -d $SRCPATH/$folder ]
+    then
+      xecho ". "
+      [ `exist "$HOME/$folder"` ] && \
+        error "SNO: $SRCPATH/$folder already exists"
+      mv $SRCPATH/$folder $HOME/$folder
+    else
+      echo "(skip) "
+    fi
+  done
+  echo
+  
+  # FIXME:
+  # on hp-ux this can cause the following error
+  # rmdir: $VERDIR/$NEWVERSION: Cannot remove mountable directory
+  rmdir $VERDIR/$NEWVERSION
+
+  echo "Swap complete"
+}
+
+#+      [tarz]           Manage .tar.Z files
+#+  
+#+      Copies an entire logical disk into a compressed tar file. The backup
+#+      resembles the scheme described in the "QICWARE Reference Manual"; 
+#+      however we create 5 files monday-friday instead of the grandparent,
+#+      parent, child method in the manual.
+#+ 
+#+      Example: qw tarz VSD /home
+#+ 
+#+      Extraction example: qw tarz extract /home/Wednesday.tar.Z
+#+      Extraction example: qw tarz extract Friday.CHI.tar.Z chi/chi.fs.dat
+#+
+#+      WARNING due to a temporary limitation with compress on linux, archives
+#+      created on linux will be done so useing gzip. This means that they 
+#+      will not be portable to other OS-es.
+#+  
+cmd_tarz()
+{
+  CMD=$1
+  shift
+
+  [ -z "$CMD"  -o -z "$1" ] && \
+    { echo "Usage: qw tarz [create|extract|list] ..."; exit 1; }
+
+  [ -z "$TAR" ] && error "TAR not supported on this OS."
+  [ -z "$COMPRESS" ] && error "COMPRESS not supported on this OS."
+
+  case $CMD in
+  create)
+    [ -z "$1" -o -z "2" ] && error "Usage: qw tarz create <archive> <folder>"
+    [ ! -d $2 ] && error "$2 does not exist"
+
+    DSTPATH=$1
+    SRCPATH=$2
+    SRCDIR=`basename $2`
+
+    # Handle gzip files appropriately.
+    # Previously a kludge
+    [ ! -z "`echo $DSTPATH | grep gz$`" ] && \
+      COMPRESS="gzip -f"
+
+    echo "Copying $SRCPATH to $DSTPATH ($OS)"
+    sh -c "cd $SRCPATH/..; $TAR $SRCDIR" | $COMPRESS > $DSTPATH
+    ;;
+  extract)
+    [ -z "$1" ] && error "Usage: qw tarz extract <archive>"
+
+    [ -z "$2" ] && \
+      { xecho "All files will be extracted enter to continue: " ; read a ; }
+
+    # Handle gzip files appropriately.
+    # Previously a kludge
+    [ ! -z "`echo $DSTPATH | grep gz$`" ] && \
+      COMPRESS="gzip -f"
+
+    $UNCOMPRESS $1 | $UNTAR $2
+    ;;
+  list)
+    [ -z "$1" ] && error "Usage: qw tarz list <archive>"
+    if [ $OS = "rh_linux" ]
+    then
+      tar tvzf $1
+    elif [ $OS = "sco_unix" ]
+    then
+      zcat $1 | tar tvf -
+    else
+      echo "unsupported"
+    fi
+    ;;
+  *)
+    error "Unknown tarz option"
+  esac
+}
+
+#+      [umount]         Un-mounts the CD
+#+ 
+cmd_umount()
+{
+  echo "Unmounting cd"
+  chkcmd su root -c "$UMOUNT /mnt"
+}
+
+#+      [updatescript]   Installs the latest version of this script
+#+ 
+# FIXME: Provide more error information by parsing the http response.
+#
+cmd_updatescript()
+{
+  THIS_TEMP=${THIS}.tmp
+  wget11 "patrick.fremont.ca.us" "/qantel/qicware/qw/qw" $THIS_TEMP
+  chmod u+x $THIS_TEMP
+  grep "QICWARE Administration Script" $THIS_TEMP >/dev/null
+
+  if [ ! $? = 0 ] 
+  then
+#STRERR=`grep -i TITLE $THIS_TEMP|awk -F'>' '{print $2}'|awk -F'<' '{print $1}'`
+    error "Transfer failed. $STRERR"
+  fi
+
+  mv $THIS_TEMP $THIS
+  echo "Update complete"
+
+  $THIS postupdate
+}
+
+#+      [upgrade]        Installs the latest version of QICWARE from cd
+#+ 
+cmd_upgrade()
+{
+  if [ -z "`echo $@ | grep auto`" ] ; then
+    cmd_updatescript           #comment this if you are working on a mod
+    echo "Running new script." #postupdate has already been run
+    $THIS upgrade $@ auto      #call this script again to run the new version
+  else
+
+    if [ ! -z "`echo $@ | grep www`" ] ; then
+      cmd_install $@
+    else
+      cmd_mount
+      cmd_install
+      cmd_umount
+    fi
+
+    echo "PRESS ENTER TO SHUTDOWN QICWARE AND CONTINUE INSTALL"
+    read a
+    cmd_stop2
+    waitoncfig
+    # cmd_xml stop
+    cmd_backup
+
+    cmd_swap $VERSION
+    cmd_restore
+    # cmd_xml start
+
+    JAVA_HOME=`get JAVA_HOME | awk '{print $1}'`
+    [ ! -z "$JAVA_HOME" ] && { echo "restarting xml" ; cmd_xml restart ; }
+
+    cmd_qsetperms
+    cmd_start
+  fi
+}
+
+#+      [useradd]        Adds QICWARE admin to the system
+#+ 
+# NOTE: This is a special case handled in the main routine but we put these
+# lines here for the help documentation.
+
+#+      [ver]            Reports version information
+#+ 
+cmd_ver()
+{
+  echo "os:   " `os`
+  #echo_longver $HOME/bin/qrun
+
+  echo "qw:    `grep \"[V]ersion:\" $THIS | cut -d' ' -f3 `"
+  
+  # Unfortunately this doesnt work on sco (surprise)
+  # echo "  last update" `find $THIS -printf "%CH:%CM:%CS %Cm/%Cd/%Cy"`
+
+  [ -f $HOME/etc/.cid ] && echo "cid:   `cat $HOME/etc/.cid`"
+
+  chkfile $HOME/bin/qrun
+  #echo "qrun:" `echo_shortver $HOME/bin/qrun`
+  echo "qrun: " `echo_longver $HOME/bin/qrun`
+
+  chkfile $HOME/bin/qcfig
+  #echo "qcfig:" `echo_shortver $HOME/bin/qcfig`
+  echo "qcfig:" `echo_longver $HOME/bin/qcfig`
+}
+
+#+      [ver!]           Reports extensive version information
+#+ 
+cmd_ver2()
+{
+
+  # This scans the sys directory for version numbers of a certain format.
+  # The following utilities do not match this format.
+  #*ENDITOR
+  #*IPL
+  #*KEYBILD
+  #*MONITOR
+  #*SPOOL
+  #*TITLE
+  #*XTAPE
+
+  echo "checking utility versions ..."
+  for x in `ls $HOME/sys/sys`
+  do
+    # Check to make sure the file does not have a period
+    if [ -z "`echo $x | grep "\."`" ]
+    then
+      strings $HOME/sys/sys/$x | grep `qqname $x`[0-9] | cut -d"(" -f2 | \
+        tr ")" " " |cut -d" " -f1 | grep "\." |grep `qqname $x`
+    fi
+  done
+}
+
+#+      [who]            Displays a qsockserver process tree
+#+ 
+cmd_who()
+{
+  $NETSTAT -a | grep tcp | egrep "1059|1060|1706" | grep -v "*" | awk '{print $5}' | awk -F: '{print $1}' | sort|uniq
+  #cmd_hostpid
+}
+
+#+      [xml]            Starts xihpias
+#+
+#+      Starts and stops xiphias. The stop command waits until xiphias has
+#+      actually terminated. The start command returns immediately and is 
+#+      unable to report any problems that might occur because it is started
+#+      in background. It takes a couple of seconds for the server to accept
+#+      requests either from QICBASIC programs or HTTP clients.
+#+ 
+# We use stdout.log as the name of the redirection file because that seems to
+# be popular with java programs.  We use /var/tmp for log files because this is 
+# the default for the JRE but as a note:
+# "The /var/tmp directory is made available for programs that require temporary 
+# files or directories that are preserved between system reboots. Therefore, 
+# data stored in /var/tmp is more persistent than data in /tmp." 
+# -Filesystem Hierarchy Standard
+#
+cmd_xml()
+{
+  [ -z "$1" ] && { echo "Usage: qw xml [start|stop]"; exit 1; }
+
+  JAVA_HOME=`get JAVA_HOME | awk '{print $1}'`
+  PATH=$JAVA_HOME/bin:$PATH
+  XMLDIR=$HOME/etc/qxml
+  export JAVA_HOME PATH
+
+  # This overrides a var in this script but I think I prefer this value for it.
+  TMPDIR=`getkeyvalue TMPDIR $QCFIG`
+  [ $? -ne 0 -o -z "$TMPDIR" ] && TMPDIR=/tmp
+
+  #echo "JAVA_HOME: '$JAVA_HOME'"
+  [ ! -d "$JAVA_HOME" ] && error "JAVA_HOME invalid."
+
+  # Use linuxThreads to work around NPTL bug.
+  # https://bugzilla.redhat.com/bugzilla/show_bug.cgi?id=108631
+  # rpmvercmp returns +1 if a is "newer", 0 if equal, -1 if b is "newer" 
+  # rpmvercmp `rpm -q glibc` glibc-2.3.2-95.5 
+  #[ $OS = "rh_linux" ] && [[ "`rpm -q glibc`" < "glibc-2.3.2-95.5" ]] && \
+  #  { echo "WARNING: Using linuxThreads." ; export LD_ASSUME_KERNEL=2.2.5 ; }
+
+  # May cause problem rebinding to port
+  #JDB="-Xdebug -Xrunjdwp:transport=dt_socket,address=8000,server=y,suspend=n"
+
+  # Force SCO to utf-8
+  #LANG=en_US.UTF-8 ; export LANG
+
+  cd $XMLDIR
+  XIPHIAS="java -D$1 -Xrs $JDB -Dcom.qantel.xiphias.HttpServer.Timeout=20000 -Dfile.encoding=UTF-8 -Djava.ext.dirs=. -Djava.util.logging.config.file=logging.properties -jar xiphias.jar $@"
+
+  if [ $1 = "start" ] ; then
+    xecho "Starting xiphias: "
+    # There's no way to determine the location of the xiphias file
+    # mv $XMLDIR/java0.log $XMLDIR/java0.log.1 >/dev/null 2>&1
+    mv $TMPDIR/stdout.log $TMPDIR/stdout.log.1 >/dev/null 2>&1
+    if [ $OS = "sco_unix" ] ; then
+      nohup $XIPHIAS >$TMPDIR/stdout.log 2>&1 &
+    else
+      $XIPHIAS >$TMPDIR/stdout.log 2>&1 &
+    fi
+    echo_status $?
+    echo
+  elif [ $1 = "gdb" ] ; then
+    PID=$2
+    [ -z $2 ] && PID=`ps -ef | grep [x]iphias | awk '{print $2}'`
+    gdb java $PID
+  elif [ $1 = "jdb" ] ; then
+    jdb -attach 8000
+  elif [ $1 = "restart" ] ; then
+    cmd_xml stop
+    cmd_xml start
+  else
+    $XIPHIAS
+  fi
+}
+
+#+      [xping]          Ping xml server with echo support.
+#+
+#+      Checks the status of the xml server.
+cmd_xping()
+{
+  #[ -z "$1" ] && { echo "Usage: qw xping host"; exit 1; }
+  HOST=127.0.0.1
+  [ ! -z "$1" ] && HOST=$1
+  PORT=8181
+  [ ! -z "$2" ] && PORT=$2
+
+  TIMEOUT=5
+  SND=`date +%Y-%m-%dT%H:%M:%S`
+  RCV=`http11 "$HOST:$PORT" "/stateful" \
+  "<?xml version=\"1.0\"?><Echo xmlns=\"rrn:com.qantel:schemas/v1_0/echo.xsd\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"rrn:com.qantel:schemas/v1_0/echo.xsd ./echo.xsd\"><EchoRequest>$SND</EchoRequest><EchoResponse></EchoResponse></Echo>"`
+  RCV=`echo $RCV | sed 's|.*<EchoResponse.*>\(.*\)</EchoResponse>.*|\1|'`
+
+  if [ "$SND" = "$RCV" ] ; then
+    echo "up"
+  else
+    echo "down"
+  fi
+}
+
+#+ NNOOTTEESS
+#+      You might notice that some XWindows terminals exhibit some strage
+#+      symptoms when running this script. Below is a list of terminals
+#+      symptoms and workarounds.
+#+ 
+#+      hpterm
+#+      The terminal may display the word 'logout' after each command. It
+#+      may not have variables set even though they were called out in the
+#+      .profile and are set properly in a non xwindows login. To correct
+#+      the problem add the following lines to the end of the .vueprofile.
+#+       
+#+      export ENVFILE=~/.profile
+#+      export ENV='${ENVFILE[(${#-}==0)+(_$-=0)+(_=1)-_${-%%*i*}]}'
+#+ 
+#+ AAUUTTHHOORR
+#+      Written by Patrick Melo
+#+ 
+#+ RREEPPOORRTTIINNGG BBUUGGSS
+#+      Report bugs to <patrick@qantel.com>.
+#+ 
+#+ CCOOPPYYRRIIGGHHTT
+#+      Copyright � 2000 Patrick Melo
+#+      This is free software; see the source for  copying  condi-
+#+      tions.  There is NO warranty; not even for MERCHANTABILITY
+#+      or FITNESS FOR A PARTICULAR PURPOSE.
+#+ 
+
+################################################################################
+# Supporting functions                                                         #
+################################################################################
+
+# Description: 
+# Arguments: 
+# Returns: 
+#
+backup()
+{
+  NATIVE=`echo_qupath $1`
+  [ $? -ne 0 ] && { echo "ERROR: $NATIVE" ; return 1 ;  }
+
+  NFILE=`basename $NATIVE`
+
+  case "`gettype $NATIVE`" in
+  K)
+    #[ ! -f $NATIVE.idx -o ! -f $NATIVE.dat ] && error "$1 does not exist."
+    cp $NATIVE.idx $CUSDIR/$NFILE.idx
+    cp $NATIVE.dat $CUSDIR/$NFILE.dat 
+    ;;
+  O)
+    #[ ! -f $NATIVE ] && error "$1 does not exist."
+    cp $NATIVE $CUSDIR/$NFILE
+    ;;
+  S)
+    error "Sequential files must be dealt with manually."
+    ;;
+  *)
+    #error "$NFILE file is not archived."
+    xecho "$NFILE(skipped) "
+  esac
+}
+
+# Function name: discroot
+# Description: Identifies the root directory for a disk
+# Arguments: The disk.
+# Returns: Nothing.
+#
+discroot()
+{
+  DISC=$1
+ FS=`grep $DISC $QCFIG|awk -F, '/^DISC/ {print $4}'|awk '{print $1}'|tr '"' ' '`
+  [ -z "$FS" ] && error "Cannot file disc for $1."
+  dirname $FS
+}
+
+# Function name: echo_failure
+# Description: 
+# Arguments: 
+# Returns: 
+#
+echo_failure() {
+  [ "$BOOTUP" = "color" ] && $MOVE_TO_COL
+  xecho "["
+  [ "$BOOTUP" = "color" ] && $SETCOLOR_FAILURE
+  xecho "FAILED"
+  [ "$BOOTUP" = "color" ] && $SETCOLOR_NORMAL
+  xecho "]"
+  xecho
+  return 1
+}
+
+# Function name: echo_status
+# Description: 
+# Arguments: 
+# Returns: 
+#
+echo_status()
+{
+  STATUS=$1
+
+  if [ $OS = "rh_linux" ]
+  then
+    BOOTUP=color
+    MOVE_TO_COL="echo -en \\033[60G"
+    SETCOLOR_SUCCESS="echo -en \\033[1;32m"
+    SETCOLOR_FAILURE="echo -en \\033[1;31m"
+    SETCOLOR_NORMAL="echo -en \\033[0;39m"
+  fi
+
+  if [ $STATUS = 0 ] 
+  then
+    echo_success
+  else
+    echo_failure
+  fi
+}
+
+# Function name: echo_success
+# Description: 
+# Arguments: 
+# Returns: 
+#
+echo_success() 
+{
+  [ "$BOOTUP" = "color" ] && $MOVE_TO_COL
+  xecho "[  "
+  [ "$BOOTUP" = "color" ] && $SETCOLOR_SUCCESS
+  xecho "OK"
+  [ "$BOOTUP" = "color" ] && $SETCOLOR_NORMAL
+  xecho "  ]"
+  xecho 
+  return 0
+}
+
+# Function name: error
+# Description: Error out gracefully.
+# Arguments: none
+# Returns: nothing
+#
+error()
+{
+  echo "FATAL ERROR: $1"
+  exit 1
+}
+
+# Function name: exist
+# Description: 
+# Arguments: 
+# Returns: 
+#
+exist()
+{
+  [ -d $1 -o -f $1 ] && echo "true"
+}
+
+# Function name: getfilename
+# Description: 
+# Arguments: 
+# Returns: 
+#
+getfilename()
+{
+  TMP=`echo "$1" | awk -F "/" '{print $NF}'`
+
+  [ -z "$TMP" ] && echo $1
+
+  echo $TMP
+}
+
+# Function name: getid
+# Description: Determine the current user id.
+# Arguments: none
+# Returns: The current user id.
+#
+getid()
+{
+  echo `id | cut -d"(" -f2 | cut -d")" -f1`
+}
+
+# Function name: getip
+# Description: 
+# Arguments: 
+# Returns: 
+#
+getip()
+{
+  # FIXME: need to check for bogus hosts!!!
+  # right now it returns the name server
+  echo `nslookup $1 2>/dev/null | tail -2 | head -1 | awk '{print $2}'`
+}
+
+# Function name: get
+# Description: Retrieves settings from configuration file.
+# Arguments:
+# Returns:
+#
+get() {
+  TMP=`egrep "^# $1:" $CONF 2>/dev/null| cut -d: -f2 | awk '{print $1}'`
+  echo $TMP
+}
+
+# Function name: getkeyvalue
+# Description: 
+# Arguments: 
+# Returns: 
+#
+# FIXME: Does not ignore commented keys.
+#
+getkeyvalue()
+{
+  KEY=$1
+  FILE=$2
+  VALUE=`grep "$KEY[[:space:]]*=" $FILE | awk -F'=' '{print $2}'`
+  [ -z "$VALUE" ] &&  { echo "No $KEY in $FILE.";exit 1; }
+  echo $VALUE
+}
+
+# Function name: getos
+# Description: Determines the operating system.
+# Arguments: none
+# Returns: An operating system identifier.
+#
+getos()
+{
+  UNAME=`uname`
+  case "$UNAME" in
+  AIX)
+    echo "ibm_aix"
+    ;;
+  HP-UX)
+    echo "hp_ux"
+    ;;
+  OSF1)
+    echo "dec_unix"
+    ;;
+  SCO_SV)
+    echo "sco_unix"
+    ;;
+  Linux)
+    echo "rh_linux"
+    ;;
+  *)
+    error "Error determining OS."
+    ;;
+  esac
+}
+
+# Function name: gettype
+# Description: 
+# Arguments: 
+# Returns: 
+#
+gettype()
+{
+  [ -z "$1" ] && error "Usage"
+
+  [ ! -z "`echo $1 | awk '/.idx$/ || /.dat$/'`" ] && error "Usage: $1"
+
+  if [ -f $1 ]
+  then
+    MAGIC="001 007 000 003"
+    DUMP=`od -An -toC -N 4 $1 2>/dev/null|\
+      head -1 | awk '{print $1,$2,$3,$4}'`
+
+    if [ "$DUMP" = "$MAGIC" ] ; then
+      echo "O"
+    else
+      echo "S"
+    fi
+
+  elif [ -f $1.dat -a -f $1.idx ]
+  then
+    echo "K"
+  else
+    error "$1 does not exist."
+  fi
+}
+
+# Function name: getunique
+# Description: Generates a unique identifier
+# Arguments: None
+# Returns: id
+#
+getunique()
+{
+  date +%Y%m%d%H%M%S
+}
+
+# Function name: hostpid (unused)
+# Description: Identifies PIDs of the qsockserver for the given host
+# Arguments: Server, file_to_download.
+# Returns: Nothing.
+#
+hostpid()
+{
+  [ -z "$1" ] && error "Usage: hostpid <pid>"
+
+  IP=`getip $1`
+  LOG=`getkeyvalue LOG $QCFIG`
+  [ $? -ne 0 ] && error "$FILE"
+
+  for x in `grep $IP $LOG | grep "Accepted" | awk '{print $NF}' | cut -d. -f1`
+  do
+    ps -p$x | grep -v PID
+  done
+}
+
+# Function name: http11
+# Description: Updated version of wget that supports posting.
+# Arguments: 
+# Returns:
+#
+# Examples:
+# http11 "www.patrick.fremont.ca.us" "/qantel/qicware/ping/"
+# http11 "www.patrick.fremont.ca.us" "/qantel/qicware/ping/" "<Echo>"
+http11()
+{
+  HOST=`echo $1 | awk -F: '{print $1}'`
+  PORT=`echo $1 | awk -F: '{print $2}'`
+  [ -z "$PORT" ] && PORT="80"
+  FILE=$2
+  BODY=$3
+  if [ -z "$BODY" ] ; then
+    METH=GET
+  else
+    METH=POST
+    BLEN=`echo -n $BODY | wc -m`
+  fi
+  #echo "Using length of '$BLEN'"
+
+  #echo "Opening connection to foreign host."
+  { echo "$METH $FILE HTTP/1.1" ; echo "Host: $HOST" ; \
+  [ $METH = "POST" ] && echo "Content-Length: $BLEN" ; \
+  echo "User-Agent: qw" ; echo ;
+  [ $METH = "POST" ] && echo $BODY ; \
+  sleep $TIMEOUT ; } | \
+  $TELNET $HOST $PORT 2>/dev/null | tr -d '\15\32' | \
+  { while [ "`read r; echo $r`" != "" ]; do true ; done ; cat ; }
+}
+
+# Function name: init
+# Description: Initialize global variables. The only pre-existing variable
+#   needed is $HOME.
+# Arguments: none
+# Returns: nothing
+#
+# FIXME: Change .admintools dirnames to be 3 chars long e.g. bin cnf ver bk1 bk5
+init()
+{
+  QWADMIN=qwadmin
+  QWGROUP=qicware
+
+  #HOME=`grep $QWADMIN /etc/passwd | awk -F: '{print $6}'`
+  HOME=`finger qwadmin | grep Directory | head -1 | awk -F" " '{print $2}'`
+  [ ! -d $HOME ] && error "HOME is invalid ($HOME)"
+
+  QCFIG=$HOME/etc/m01.cfig
+  export QCFIG
+
+  ADMDIR=$HOME/.admintools
+  BINDIR=$ADMDIR/bin
+  CUSDIR=$ADMDIR/cus
+  INSDIR=$ADMDIR/ins
+  INSSRC=""
+  TMPDIR=$ADMDIR/tmp
+  VERDIR=$ADMDIR/ver
+
+  THIS=$BINDIR/qw
+  CONF=$CUSDIR/qw.conf
+
+  # For commands with a null default, check for null in functions.
+  COMPRESS=""
+  INSSRC=""
+  NETSTAT=netstat
+  PSALL="ps -ef"
+  SHOWNET=""
+  TAR=""
+  TELNET=/usr/bin/telnet
+  UMOUNT=umount
+  NSLOOKUP=nslookup
+  UNCOMPRESS="uncompress -c"
+  UNTAR="tar xf -"
+  [ ! -z "$VISUAL" ] && EDITOR=$VISUAL
+  [ -z "$EDITOR" ] && EDITOR=vi
+
+  OS=`getos`
+
+  # set global variables
+  case $OS in
+  dec_unix)
+    INSSRC=/mnt/qicware/dec_unix
+    NETSTAT=/usr/sbin/netstat
+    SHOWNET="/sbin/ifconfig -a"
+    UMOUNT=/usr/sbin/umount
+    ;;
+  hp_ux)
+    INSSRC=/mnt/QICWARE/HP_UX
+    SHOWNET="/etc/lanscan"
+    ;;
+  ibm_aix)
+    INSSRC=/mnt/qicware/ibm_aix
+    SHOWNET="netstat -i"
+    ;;
+  rh_linux)
+    COMPRESS="gzip -f" # rhel does not supply compress by default
+    #COMPRESS="compress -f"
+    #INSSRC=/mnt/qicware/rh_linux
+    if [ "`uname -p`" = "x86_64" ] ; then
+      INSSRC=/mnt/qicware/rh_linux.64e
+    else
+      INSSRC=/mnt/qicware/rh_linux
+    fi
+    NSLOOKUP="nslookup -sil"
+    PSALL="ps -efw"
+    SHOWNET="/sbin/ifconfig"
+    TAR="tar cO"
+    #UNCOMPRESS="gunzip -c $2"
+    ;;
+  sco_udk)
+    INSSRC=/mnt/qicware/sco_udk
+    SHOWNET="/sbin/ifconfig"
+    ;;
+  sco_unix)
+    COMPRESS="compress -Hf"
+    INSSRC=/mnt/qicware/sco_unix
+    SHOWNET="/etc/ifconfig -a"
+    # tar: start right away (c), truncate abspaths (A), send to stdout (f -)
+    # compress: LZH (H), to file (f) 
+    TAR="tar cAf -"
+    ;;
+  esac
+}
+
+# Function name: k_link
+# Description: 
+# Arguments: 
+# Returns: 
+#
+k_link()
+{
+  FNAME=`basename $1`
+
+  DSIZE=`qfsck -h $1 | grep "bytes/data record" | cut -d" " -f1`
+  KSIZE=`qfsck -h $1 | grep "UNIQ" | cut -d"(" -f2 | cut -d"," -f2`
+
+  RSIZE=`expr $DSIZE - $KSIZE`
+
+  [ -z "$RSIZE" ] && error "SNO: Error calculating record size."
+
+  # The manual says that you need to use single quotes in the qln
+  # type information but the shell is doing strange things with them
+  # optarg doesnt reallyy care if you use single or double quotes
+  # but there needs to be one or the other so that the options are
+  # taken as one parameter.
+
+  if [ -f $HOME/etc/m01.cseg ]
+  then
+    qln -F $QCFIG -r -t "$FNAME K 0 $RSIZE $KSIZE" $1 | grep -v Incorrectly
+  else
+    qln -r -t "$FNAME K 0 $RSIZE $KSIZE" $1 | grep -v Incorrectly
+  fi
+}
+
+# Function name: mkls
+# Description: Creates a script to ls -l by typing simply l
+# Arguments: 
+# Returns: 
+#
+mkls()
+{
+  case $OS in
+  rh_linux)
+    echo "ls -l --color \$@" > $BINDIR/l
+    ;;
+  *)
+    echo "ls -l \$@" > $BINDIR/l
+  esac
+
+  chmod u+x $BINDIR/l
+}
+
+# Function name: o_link
+# Description: 
+# Arguments: 
+# Returns: 
+#
+# NOTES: We have not abstracted link() because we want to maintain -t ""
+o_link()
+{
+  FNAME=`basename $1`
+  SIZE=`ls -l $1 | awk '{print $5}'`
+  RSIZE=`expr $SIZE / 756`
+
+  if [ -f $HOME/etc/m01.cseg ]
+  then
+    qln -F $QCFIG -r -t "$FNAME O $RSIZE 756" $1 | grep -v "file size should be"
+  else
+    qln -r -t "$FNAME O $RSIZE 756" $1 | grep -v "file size should be"
+  fi
+}
+
+# Function name: os
+# Description: Displays the operating system version
+# Arguments: 
+# Returns: 
+#
+# If you find that you're displaying processes that you do not think
+# belong to QICWARE, check the QICWARE bin directory for files like 'l'.
+os()
+{
+  case $OS in
+  dec_unix)
+    strings /vmunix | grep '(Rev.' | cut -f1 -d';'
+    ;;
+  hp_ux)
+    echo "`uname -s` `uname -r`"
+    ;;
+  ibm_aix)
+    echo "IBM-AIX `oslevel`"
+    ;;
+  rh_linux)
+    [ -f /etc/redhat-release ] && cat /etc/redhat-release
+    ;;
+  sco_unix)
+    echo "`uname -s` `uname -X | grep Release | awk '{print $3}'`"
+    ;;
+  esac
+}
+
+# Function name: cmd_postupdate
+# Function name: restore
+# Description: 
+# Arguments: 
+# Returns: 
+#
+# NOTE: The backed up disk must be of the same type as the restored disc
+restore()
+{
+  NATIVE=`echo_qupath $1`
+  [ $? -ne 0 ] && error "$NATIVE"
+
+  NPATH=`dirname $NATIVE`
+  NFILE=`basename $NATIVE`
+
+  [ ! -d $NPATH ] && error "Destination directory does not exist."
+
+  case "`gettype $CUSDIR/$NFILE`" in
+  K)
+    #[ ! -f $NATIVE.idx -o ! -f $NATIVE.dat ] && error "$1 does not exist."
+    cp $CUSDIR/$NFILE.idx $NATIVE.idx
+    cp $CUSDIR/$NFILE.dat $NATIVE.dat
+    k_link $NATIVE
+    ;;
+  O)
+    #[ ! -f $NATIVE ] && error "$1 does not exist."
+    cp $CUSDIR/$NFILE $NATIVE
+    o_link $NATIVE
+    ;;
+  S)
+    cp $CUSDIR/$NFILE $NATIVE
+    error "Sequential files must be dealt with manually."
+    ;;
+  *)
+    error "$NFILE file is not archived."
+  esac
+}
+
+# Function name: s_link
+# Description: 
+# Arguments: 
+# Returns: 
+#
+# FIXME: We need .t information for this!
+s_link()
+{
+  #FNAME=`basename $1`
+  #qln -F $QCFIG -r -t "$FNAME S" $1
+  error "Sequential files must be linked manually."
+}
+
+# Function name: setback1
+# Description: 
+# Arguments: 
+# Returns: 
+#
+setback1()
+{
+  BACK1=$ADMDIR/back1
+
+  # see if link exists
+  [ ! -L $BACK1 ] && error "back1 does not exist."
+
+  # get the file it points to
+  BACK1=`ls -l $BACK1 | awk -F">" '{print $2}' | awk '{print $1}'`
+
+  # make sure its an abs path so that the check to see if dir exist is easy
+  # [ "`echo $BACK1 | cut -c1`" != "/" ] && error "$BACK1: invalid symlink"
+  [ "`echo $BACK1 | cut -c1`" != "/" ] && \
+    { echo "ERROR: $BACK1 does not exist." ; return 1 ;  }
+
+  # make sure that file exits
+  #[ ! -d $BACK1 ] && error "$BACK1 does not exist."
+  [ ! -d $BACK1 ] && { echo "ERROR: $BACK1 does not exist." ; return 1 ;  }
+  return 0
+}
+
+# Function name: setback5
+# Description: 
+# Arguments: 
+# Returns: 
+#
+setback5()
+{
+  BACK5=$ADMDIR/back5
+
+  # see if link exists
+  [ ! -L $BACK5 ] && error "back5 does not exist."
+
+  # get the file it points to
+  BACK5=`ls -l $BACK5 | awk -F">" '{print $2}' | awk '{print $1}'`
+
+  # make sure its an abs path so that the check to see if dir exist is easy
+  # [ "`echo $BACK5 | cut -c1`" != "/" ] && error "$BACK5: invalid symlink"
+  [ "`echo $BACK5 | cut -c1`" != "/" ] && \
+    { echo "ERROR: $BACK5 does not exist." ; return 1 ;  }
+
+  # make sure that file exits
+  #[ ! -d $BACK5 ] && error "$BACK5 does not exist."
+  [ ! -d $BACK5 ] && { echo "ERROR: $BACK5 does not exist." ; return 1 ;  }
+  return 0
+}
+
+# Function name: sno
+# Description: 
+# Arguments: 
+# Returns: 
+#
+sno()
+{
+  echo "SNO ERROR: $1"
+  echo 
+  echo "The error you encountered should not have occured. Please stop what you"
+  echo "are doing and contact support immediately. QICWARE support can be"
+  echo "contacted by email at support@qantel.com or by phone at 800.666.3686."
+  exit 1
+}
+
+# Function name: tracelink
+# Description: 
+# Arguments: 
+# Returns: 
+#
+tracelink()
+{
+  SYMLINK=$1
+
+  # see if link exists
+  [ ! -L $SYMLINK ] &&  \
+    { echo "$SYMLINK does not exist." ; return 1 ;  }
+
+  # get the file it points to
+  ACTLINK=`ls -l $SYMLINK | awk -F">" '{print $2}' | awk '{print $1}'`
+
+  # make sure its an abs path so that the check to see if dir exist is easy
+  [ "`echo $ACTLINK | cut -c1`" != "/" ] && \
+    { echo "ERROR: $BACK0 does not exist." ; return 1 ;  }
+
+  # make sure that file exits
+  [ ! -d $ACTLINK ] && \
+    { echo "ERROR: $ACTLINK does not exist." ; return 1 ;  }
+
+  echo $ACTLINK
+  return 0
+}
+
+waitoncfig()
+{
+  MAXWAIT=3600 # 1H
+  xecho "Waiting for processes to clear"
+  i=0
+  while [ -f $HOME/etc/m01.cseg -a ! -z "`cmd_ps`" ]
+  do
+    xecho "."
+    sleep 1
+    i=`expr $i + 1`
+    [ ! $i -lt $MAXWAIT ] && error "timeout"
+  done
+  echo
+}
+
+# Function name: wget10
+# Description: Downloads file from web site using 1.0 protocol.
+# Arguments: Server, file_to_download.
+# Returns: Nothing.
+#
+wget10()
+{
+  SERVER=$1
+  FILE=$2
+  DST=$3
+
+  echo "Opening connection to foreign host."
+  { echo "GET $FILE" ; sleep 3 ; } | \
+  $TELNET $SERVER 80 | \
+  {  read a ; read b ; read c ; cat>$DST ; }
+}
+
+# Function name: wget11
+# Description: Downloads file from web site using 1.1 protocol.
+# Arguments: Server, file_to_download.
+# Returns: Nothing.
+#
+wget11()
+{
+  SERVER=$1
+  FILE=$2
+  DST=$3
+
+  echo "Opening connection to foreign host."
+  { echo "GET $2 HTTP/1.1" ; echo "Host: $1" ; \
+  echo "User-Agent: qw" ; echo ; sleep 3 ; } | \
+  $TELNET $1 80  2>/dev/null | tr -d '\15\32' | \
+  { while [ "`read r; echo $r`" != "" ]; do true ; done ; cat>$DST ; }
+}
+
+# Function name: xecho
+# Description: Echo without the linefeed.
+# Arguments: none
+# Returns: A line containing the text without a linefeed.
+#
+xecho()
+{
+  case $OS in
+  rh_linux)
+    echo -n "$@"
+    ;;
+  *)
+    echo "$@\c" 
+    ;;
+  esac
+}
+
+################################################################################
+# chk functions                                                                #
+# These functions act as assertions.
+################################################################################
+
+chkabspath()
+{
+  TMP=`echo "$1" | cut -c1`
+  [ ! "$TMP" = "/" ] && error "Command must be called with an absolute path."
+}
+
+# Function name: chkdown
+# Description: Asserts that QICWARE is not running.
+# Arguments: none
+# Returns: nothing
+#
+chkdown()
+{
+  [ -f $HOME/etc/m01.cseg ] && error "QICWARE is currently running."
+}
+
+chkfile()
+{
+  [ ! -f $1 ] && error "Cannot find $1"
+}
+
+# Function name: chkid
+# Description: Assert that the current user is the QICWARE administrator.
+# Arguments: none
+# Returns: nothing
+#
+chkid()
+{
+  ID=`getid`
+
+  [ $ID != $1 ] && error "$1 must run this script, it cannot be run as $ID."
+  
+}
+
+# Function name: chkrm
+# Description: Asserts that the removal of the file occurs
+# Arguments: none
+# Returns: nothing
+#
+chkrm()
+{
+  [ "`rm -f $1 2>&1`" != "" ] && error "cannot remove $1"
+}
+
+# Function name: chksu
+# Description: Assert that the su command completes successfully.
+# Arguments: none
+# Returns: nothing
+#
+chkcmd()
+{
+  CMD=$@
+  STATUS=1
+  while [ $STATUS -eq 1 ] ; do
+    "$@"
+    STATUS=$?
+  done
+}
+
+# Function name: chkup
+# Description: Asserts that QICWARE is not running.
+# Arguments: none
+# Returns: nothing
+#
+chkup()
+{
+  [ ! -f $HOME/etc/m01.cseg ] && error "QICWARE is NOT currently running."
+}
+
+################################################################################
+# Echo functions                                                               #
+# These functions cannot call error because they will not exit the script,     #
+# instead they will pass the error message into the variable assignment and    #
+# exit with an error code. To use one of these functions simply check $? and   #
+# if it is non-zero then call error with the value of the assignment           #
+################################################################################
+
+echo_case()
+{
+  [ -z "$1" ] && error "error"
+
+  if [ `echo $1 |tr "[A-Z]" "[a-z]"` = $1 ]; then
+    echo "lower"
+  elif [ `echo $1 |tr "[a-z]" "[A-Z]"` = $1 ]; then
+    echo "upper"
+  else
+    echo "mixed"
+  fi
+}
+
+# Function name: echo_qupath
+# Description: 
+# Arguments: logical disc name
+# Returns: the os path to the logical disc
+#
+echo_qupath()
+{
+  PARM=$1
+
+  DISC="`echo $PARM | awk -F',' '{print $1}'`"
+  DIR="`echo $PARM | awk -F',' '{print $2}'`"
+  FILE="`echo $PARM | awk -F',' '{print $3}'`"
+
+  [ ! -f $QCFIG ] && error "Cannot find $QCFIG"
+
+  FS=`grep $DISC $QCFIG|awk -F, '/^DISC/ {print $4}'`
+  [ -z "$FS" ] && { echo "Cannot find disc for $1.";exit 1; }
+
+  NROOT=`dirname $FS`
+
+  DUMP=`od -An -toC -N 1 -j 95 $FS.idx 2>/dev/null|\
+      head -1 | awk '{print $1}'`
+
+  # IMPORTANT - This is results in the ascii value of SPACE (040) and 1 (061).
+  # How many times must I be bitten by this!
+  if [ ! "$DUMP" = "061" ]
+  then
+    NDIR="`quname $DIR | grep -v Incorrectly`"
+    NFILE="`quname $FILE | grep -v Incorrectly`"
+    NATIVE=$NROOT/$NDIR/$NFILE
+  else
+    NDIR="`quname -w $DIR | grep -v Incorrectly`"
+    NFILE="`quname -w $FILE | grep -v Incorrectly`"
+    NATIVE=$NROOT/$NDIR/$NFILE
+  fi
+
+  DISC="`echo $PARM | awk -F',' '{print $1}'`"
+  DIR="`echo $PARM | awk -F',' '{print $2}'`"
+  FILE="`echo $PARM | awk -F',' '{print $3}'`"
+
+  [ ! -f $QCFIG ] && error "Cannot find $QCFIG"
+
+  #FS=`awk -F, '/^DISC/ && /$$DISC/ {print $4}' $QCFIG`
+  FS=`grep $DISC $QCFIG|awk -F, '/^DISC/ {print $4}'`
+  [ -z "$FS" ] && error "Cannot find disc for $1."
+
+  NROOT=`dirname $FS`
+
+  DUMP=`od -An -toC -N 1 -j 95 $FS.idx 2>/dev/null|\
+      head -1 | awk '{print $1}'`
+
+  if [ ! "$DUMP" = "061" ]
+  then
+    NDIR="`quname $DIR | grep -v Incorrectly`"
+    NFILE="`quname $FILE | grep -v Incorrectly`"
+    NATIVE=$NROOT/$NDIR/$NFILE
+  else
+    NDIR="`quname -w $DIR | grep -v Incorrectly`"
+    NFILE="`quname -w $FILE | grep -v Incorrectly`"
+    NATIVE=$NROOT/$NDIR/$NFILE
+  fi
+
+  echo $NATIVE
+}
+
+# Function name: echo_ver
+# Description: Determines the whole version number. Versions are reported as
+# follows:
+#   major version
+#   | middle version
+#   | | minor version
+#   | | | build number
+#   | | | |     build month
+#   | | | |     | build day
+#   | | | |     | | build year
+#   | | | |     | | | Operating System
+#   | | | |     | | | |
+#   060209182134042798SCO UNIX
+# Arguments: none
+# Returns: The whole version number on success; nothing on failure.
+#
+# Always call chkfile before these functions to make sure the files they are
+# being acted on actually exist.
+#
+echo_ver()
+{
+  strings $1 | egrep "^06|^07|^08" | cut -d" " -f1 | tail -1
+}
+
+# Function name: echo_shortver
+# Description: Determines the first 6 version digits.
+# Arguments: 
+# Returns:  The short version number on success; nothing on failure.
+#
+echo_shortver()
+{
+  echo_ver $1 | cut -c1-6
+}
+
+echo_longver()
+{
+  TMP=`echo_ver $1`
+  VER1=`echo $TMP | cut -c1-2`
+  VER2=`echo $TMP | cut -c3-4`
+  VER3=`echo $TMP | cut -c5-6`
+  BLD=`echo $TMP | cut -c7-12`
+  DTE1=`echo $TMP | cut -c13-14`
+  DTE2=`echo $TMP | cut -c15-16`
+  DTE3=`echo $TMP | cut -c17-18`
+  TAR=`echo $TMP | cut -c19-`
+
+  #echo "version $VER1.$VER2.$VER3 build $BLD made $DTE1/$DTE2/$DTE3 for $TAR"
+  echo "$VER1.$VER2.$VER3 build $BLD made $DTE1/$DTE2/$DTE3 for $TAR"
+  
+}
+
+# Function name: main
+# Description: This is the main routine in this script and is invoked at the
+#    end of this file. The invocation is the last line of the file.
+# Arguments: None.
+# Returns: Nothing.
+#
+main() {
+  CMD=$1
+  [ ! -z "$2" ] && shift
+  init
+
+  if [ "$CMD" = "cron" ] ; then
+    #chkid root
+    cmd_cron $@
+    exit 0
+  fi
+  if [ "$CMD" = "useradd" ] ; then
+    [ ! $OS = "rh_linux" ] &&  error "This option only supported on linux"
+    chkid root
+
+    /usr/sbin/groupadd qicware
+    [ $? ] && error "Failed to add group"
+
+    /usr/sbin/useradd -d /home/qicware -g $QWGROUP $QWADMIN
+    [ $? ] && error "Failed to add user"
+
+    exit 0
+  fi
+
+  # QWADMIN only
+  chkid $QWADMIN
+
+  case "$CMD" in
+  backdisc)
+    cmd_backdisc $@ ;;
+  backup)
+    cmd_backup ;;
+  conf)
+    cmd_conf ;;
+  console)
+    cmd_console ;;
+  daemons)
+    cmd_daemons $@ ;;
+  debug)
+    cmd_debug $@ ;;
+  diff)
+    cmd_diff $@ ;;
+  discroot)
+    cmd_discroot $@ ;;
+  dnsck)
+    cmd_dnsck ;;
+  du)
+    cmd_du $@ ;;
+  filecheck)
+    cmd_filecheck $@ ;;
+  find)
+    cmd_find $@ ;;
+  help)
+    cmd_help ;;
+  hd)
+    cmd_hd $@ ;;
+  info)
+    cmd_info ;;
+  ifconfig)
+    cmd_ifconfig ;;
+  install)
+    cmd_install $@; ;;
+  installscript)
+    cmd_installscript $@ ;;
+  ipcrm)
+    cmd_ipcrm ;;
+  java)
+    cmd_java $@ ;;
+  link)
+    cmd_link $@ ;;
+  mkfs)
+    cmd_mkfs $@ ;;
+  m01.cfig)
+    cmd_m01_cfig ;;
+  mount)
+    cmd_mount ;;
+  netstat)
+    cmd_netstat ;;
+  netstat!)
+    cmd_netstat2 ;;
+  new)
+    cmd_new $@ ;;
+  oadrd.ini)
+    cmd_oadrd_ini ;;
+  odbcisql)
+    cmd_odbcisql ;;
+  postupdate) #hidden
+    cmd_postupdate ;;
+  probe)
+    cmd_probe ;;
+  ps)
+    cmd_ps ;;
+  qfsck)
+    cmd_qfsck ;;
+  qqlog)
+    cmd_qqlog ;;
+  qsetperms)
+    cmd_qsetperms ;;
+  qsqlserver.ini)
+    cmd_qsqlserver_ini ;;
+  qsqlserver.log)
+    cmd_qsqlserver_log ;;
+  restart)
+    cmd_restart ;;
+  restore)
+    cmd_restore ;;
+  rmlocks)
+    cmd_rmlocks ;;
+  sane)
+    cmd_sane ;;
+  search)
+    cmd_search $@ ;;
+  socktree)
+    cmd_socktree ;;
+  source)
+   cmd_source ;;
+  start)
+    cmd_start ;;
+  start!)
+    cmd_start2 ;;
+  status)
+    cmd_status ;;
+  stop)
+    cmd_stop ;;
+  stop!)
+    cmd_stop2 ;;
+  swap)
+    cmd_swap ;;
+  tarz)
+    cmd_tarz $@ ;;
+  umount)
+    cmd_umount ;;
+  updatescript)
+    cmd_updatescript ;;
+  upgrade)
+    cmd_upgrade $@ ;;
+  ver)
+    cmd_ver ;;
+  ver!)
+    cmd_ver2 ;;
+  who)
+    cmd_who ;;
+  xml)
+    cmd_xml $@ ;;
+  xping)
+    cmd_xping $@ ;;
+  *)
+    echo "Usage: qicware" \
+              "{ backdisc | backup | conf | console | cron | daemons | debug |
+                 diff | discroot | dnsck | du | filecheck | find | hd | help |
+                 ifconfig | info | install | installscript | ipcrm | java |
+                 link | mkfs | m01.cfig | mount | netstat[!] | oadrd.ini | 
+                 odbcisql | probe | ps | qfsck | qqlog | qsetperms |
+                 qsqlserver.ini | qsqlserver.log | restart | restore |
+                 rmlocks | sane | search | socktree | source | start[!] |
+                 status | stop[!] | swap | tarz | umount | updatescript |
+                 upgrade | useradd | ver[!] | who | xml | xping }"
+   esac
+   exit 0
+}
+
+main $@
